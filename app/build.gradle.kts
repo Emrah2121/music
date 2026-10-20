@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "az.parviz.music"
+    namespace = "az.emrah.music"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "az.parviz.music"
+        applicationId = "az.emrah.music"
         minSdk = 24
         targetSdk = 34
         versionCode = 1

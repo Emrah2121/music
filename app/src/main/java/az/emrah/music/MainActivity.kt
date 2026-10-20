@@ -1,4 +1,4 @@
-package az.parviz.music
+package az.emrah.music
 
 import android.Manifest
 import android.content.Context

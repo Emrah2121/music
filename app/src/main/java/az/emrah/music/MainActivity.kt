@@ -1,6 +1,7 @@
 package az.emrah.music
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
@@ -10,24 +11,36 @@ import android.os.Bundle
 import android.provider.MediaStore
 import java.io.FileNotFoundException
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.Image
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -36,10 +49,18 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.ImeAction
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.common.MediaMetadata
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -65,7 +86,38 @@ private val Coral = Color(0xFFFF8B74)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { PlayerApp() }
+        val sessionToken = SessionToken(this, ComponentName(this, MusicPlaybackService::class.java))
+        setContent {
+            var player by remember { mutableStateOf<MediaController?>(null) }
+            var connectionError by remember { mutableStateOf<String?>(null) }
+            DisposableEffect(sessionToken) {
+                val future = MediaController.Builder(this@MainActivity, sessionToken).buildAsync()
+                future.addListener(
+                    {
+                        try {
+                            player = future.get()
+                        } catch (error: Exception) {
+                            connectionError = error.message ?: "Pleyerə qoşulmaq mümkün olmadı"
+                        }
+                    },
+                    ContextCompat.getMainExecutor(this@MainActivity)
+                )
+                onDispose { MediaController.releaseFuture(future) }
+            }
+            when {
+                player != null -> player?.let { PlayerApp(it) }
+                connectionError != null -> MaterialTheme {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("Pleyer açıla bilmədi: $connectionError")
+                    }
+                }
+                else -> MaterialTheme {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -109,7 +161,7 @@ private fun loadSongs(ctx: Context): List<Song> {
 }
 
 @Composable
-private fun PlayerApp() {
+private fun PlayerApp(player: Player) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val preferences = remember { context.getSharedPreferences("music_preferences", Context.MODE_PRIVATE) }
     var isDark by remember { mutableStateOf(preferences.getBoolean("dark_mode", true)) }
@@ -145,13 +197,14 @@ private fun PlayerApp() {
         var songs by remember { mutableStateOf(emptyList<Song>()) }
         var selectedTab by remember { mutableStateOf(MusicTab.Home) }
         var searchQuery by remember { mutableStateOf("") }
+        var debouncedQuery by remember { mutableStateOf("") }
         var currentIndex by remember { mutableIntStateOf(-1) }
         var isPlaying by remember { mutableStateOf(false) }
         var position by remember { mutableLongStateOf(0L) }
         var duration by remember { mutableLongStateOf(0L) }
         var isPlayerOpen by remember { mutableStateOf(false) }
-        var isShuffleEnabled by remember { mutableStateOf(false) }
-        var repeatMode by remember { mutableIntStateOf(Player.REPEAT_MODE_OFF) }
+        var isShuffleEnabled by remember { mutableStateOf(player.shuffleModeEnabled) }
+        var repeatMode by remember { mutableIntStateOf(player.repeatMode) }
         var favoriteIds by remember {
             mutableStateOf(
                 preferences.getStringSet("favorites", emptySet()).orEmpty().mapNotNull(String::toLongOrNull).toSet()
@@ -161,7 +214,6 @@ private fun PlayerApp() {
         val permissionLauncher = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { hasPermission = it }
-        val player = remember { ExoPlayer.Builder(context).build() }
 
         DisposableEffect(player) {
             val listener = object : Player.Listener {
@@ -179,19 +231,34 @@ private fun PlayerApp() {
                     duration = player.duration.coerceAtLeast(0L)
                 }
             }
+            currentIndex = player.currentMediaItemIndex
+            isPlaying = player.isPlaying
+            position = player.currentPosition.coerceAtLeast(0L)
+            duration = player.duration.coerceAtLeast(0L)
             player.addListener(listener)
-            onDispose {
-                player.removeListener(listener)
-                player.release()
-            }
+            onDispose { player.removeListener(listener) }
         }
 
         LaunchedEffect(hasPermission) {
             if (hasPermission) {
                 songs = loadSongs(context)
-                player.setMediaItems(songs.map { MediaItem.fromUri(it.uri) })
-                player.prepare()
+                val mediaItems = songs.map(::toMediaItem)
+                if (player.mediaItemCount != mediaItems.size ||
+                    (mediaItems.isNotEmpty() && player.currentMediaItem?.mediaId != mediaItems.getOrNull(player.currentMediaItemIndex)?.mediaId)
+                ) {
+                    player.setMediaItems(mediaItems)
+                    player.prepare()
+                }
+                currentIndex = player.currentMediaItemIndex
+                isPlaying = player.isPlaying
+                position = player.currentPosition.coerceAtLeast(0L)
+                duration = player.duration.coerceAtLeast(0L)
             }
+        }
+
+        LaunchedEffect(searchQuery) {
+            delay(400)
+            debouncedQuery = searchQuery
         }
 
         LaunchedEffect(isPlaying) {
@@ -206,47 +273,74 @@ private fun PlayerApp() {
         val visibleSongs = when (selectedTab) {
             MusicTab.Favorites -> favoriteSongs
             MusicTab.Search -> songs.filter {
-                it.title.contains(searchQuery, ignoreCase = true) ||
-                    it.artist.contains(searchQuery, ignoreCase = true)
+                it.title.contains(debouncedQuery, ignoreCase = true) ||
+                    it.artist.contains(debouncedQuery, ignoreCase = true)
             }
             else -> songs
         }
 
+        BackHandler(enabled = isPlayerOpen && currentSong != null) {
+            isPlayerOpen = false
+        }
+
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Column(Modifier.fillMaxSize().statusBarsPadding()) {
-                if (isPlayerOpen && currentSong != null) {
-                    FullPlayer(
-                        song = currentSong,
-                        isPlaying = isPlaying,
-                        isFavorite = currentSong.id in favoriteIds,
-                        position = position,
-                        duration = duration,
-                        shuffleEnabled = isShuffleEnabled,
-                        repeatMode = repeatMode,
-                        onBack = { isPlayerOpen = false },
-                        onTogglePlay = { if (isPlaying) player.pause() else player.play() },
-                        onPrevious = { player.seekToPreviousMediaItem() },
-                        onNext = { player.seekToNextMediaItem() },
-                        onSeek = { position = it; player.seekTo(it) },
-                        onToggleFavorite = {
-                            favoriteIds = favoriteIds.toggle(currentSong.id)
-                            preferences.edit().putStringSet("favorites", favoriteIds.map(Long::toString).toSet()).apply()
-                        },
-                        onToggleShuffle = {
-                            isShuffleEnabled = !isShuffleEnabled
-                            player.shuffleModeEnabled = isShuffleEnabled
-                        },
-                        onToggleRepeat = {
-                            repeatMode = when (repeatMode) {
-                                Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
-                                Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
-                                else -> Player.REPEAT_MODE_OFF
-                            }
-                            player.repeatMode = repeatMode
-                        }
+            Box(
+                Modifier.fillMaxSize().background(
+                    Brush.verticalGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.primary.copy(alpha = .10f),
+                            MaterialTheme.colorScheme.background,
+                            MaterialTheme.colorScheme.background
+                        )
                     )
-                } else {
-                    Column(Modifier.weight(1f)) {
+                )
+            ) {
+            Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                AnimatedContent(
+                    targetState = isPlayerOpen && currentSong != null,
+                    modifier = Modifier.weight(1f),
+                    transitionSpec = {
+                        (slideInHorizontally { it / 5 } + fadeIn()) togetherWith
+                            (slideOutHorizontally { -it / 5 } + fadeOut()) using
+                            SizeTransform(clip = false)
+                    },
+                    label = "player screen transition"
+                ) { showFullPlayer ->
+                    if (showFullPlayer && currentSong != null) {
+                        FullPlayer(
+                            song = currentSong,
+                            isPlaying = isPlaying,
+                            isFavorite = currentSong.id in favoriteIds,
+                            position = position,
+                            duration = duration,
+                            shuffleEnabled = isShuffleEnabled,
+                            repeatMode = repeatMode,
+                            onBack = { isPlayerOpen = false },
+                            onTogglePlay = { if (isPlaying) player.pause() else player.play() },
+                            onPrevious = { player.seekToPreviousMediaItem() },
+                            onNext = { player.seekToNextMediaItem() },
+                            onSeek = { position = it; player.seekTo(it) },
+                            onToggleFavorite = {
+                                favoriteIds = favoriteIds.toggle(currentSong.id)
+                                preferences.edit().putStringSet("favorites", favoriteIds.map(Long::toString).toSet()).apply()
+                            },
+                            onToggleShuffle = {
+                                isShuffleEnabled = !isShuffleEnabled
+                                player.shuffleModeEnabled = isShuffleEnabled
+                            },
+                            onToggleRepeat = {
+                                repeatMode = when (repeatMode) {
+                                    Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+                                    Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+                                    else -> Player.REPEAT_MODE_OFF
+                                }
+                                player.repeatMode = repeatMode
+                            },
+                            onPreviousFromSwipe = { player.seekToPreviousMediaItem() },
+                            onNextFromSwipe = { player.seekToNextMediaItem() }
+                        )
+                    } else {
+                        Column(Modifier.fillMaxSize()) {
                         if (selectedTab == MusicTab.Search) {
                             SearchHeader(
                                 query = searchQuery,
@@ -276,7 +370,16 @@ private fun PlayerApp() {
                         } else if (songs.isEmpty()) {
                             EmptyLibrary(modifier = Modifier.weight(1f))
                         } else {
-                            when (selectedTab) {
+                            AnimatedContent(
+                                targetState = selectedTab,
+                                modifier = Modifier.weight(1f),
+                                transitionSpec = {
+                                    (fadeIn() + slideInHorizontally { it / 12 }) togetherWith
+                                        (fadeOut() + slideOutHorizontally { -it / 12 })
+                                },
+                                label = "tab transition"
+                            ) { tab ->
+                            when (tab) {
                                 MusicTab.Home -> HomeContent(
                                     songs = songs,
                                     currentIndex = currentIndex,
@@ -288,14 +391,14 @@ private fun PlayerApp() {
                                     currentSongId = currentSong?.id,
                                     isPlaying = isPlaying,
                                     emptyMessage = "Axtarışa uyğun mahnı tapılmadı",
-                                    onPlay = { playSong(player, songs.indexOf(it), songs.size); isPlayerOpen = true }
+                                    onPlay = { playSong(player, it, songs); isPlayerOpen = true }
                                 )
                                 MusicTab.Favorites -> SongList(
                                     songs = visibleSongs,
                                     currentSongId = currentSong?.id,
                                     isPlaying = isPlaying,
                                     emptyMessage = "Sevimlilərə mahnı əlavə etməmisən",
-                                    onPlay = { playSong(player, songs.indexOf(it), songs.size); isPlayerOpen = true }
+                                    onPlay = { playSong(player, it, songs); isPlayerOpen = true }
                                 )
                                 MusicTab.Library -> LibraryContent(
                                     songs = songs,
@@ -304,6 +407,7 @@ private fun PlayerApp() {
                                     onPlay = { playSong(player, it, songs.size); isPlayerOpen = true }
                                 )
                             }
+                        }
                         }
                     }
 
@@ -317,7 +421,10 @@ private fun PlayerApp() {
                         )
                     }
                     NavigationBar(
-                        containerColor = MaterialTheme.colorScheme.surface,
+                        modifier = Modifier.border(
+                            BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
+                        ),
+                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = .82f),
                         tonalElevation = 2.dp
                     ) {
                         MusicTab.entries.forEach { tab ->
@@ -339,6 +446,8 @@ private fun PlayerApp() {
                             )
                         }
                     }
+                    }
+                    }
                 }
             }
         }
@@ -348,7 +457,33 @@ private fun PlayerApp() {
 private fun Set<Long>.toggle(id: Long): Set<Long> =
     if (id in this) this - id else this + id
 
-private fun playSong(player: ExoPlayer, index: Int, songCount: Int) {
+private fun toMediaItem(song: Song): MediaItem =
+    MediaItem.Builder()
+        .setMediaId(song.id.toString())
+        .setUri(song.uri)
+        .setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(song.title)
+                .setArtist(song.artist)
+                .setArtworkUri(
+                    if (song.albumId > 0) Uri.parse("content://media/external/audio/albumart/${song.albumId}")
+                    else null
+                )
+                .build()
+        )
+        .build()
+
+private fun playSong(player: Player, song: Song, songs: List<Song>) {
+    val index = songs.indexOfFirst { it.id == song.id }
+    if (index >= 0) {
+        if (player.currentMediaItemIndex != index || player.currentMediaItem?.mediaId != song.id.toString()) {
+            player.seekTo(index, 0L)
+        }
+        player.play()
+    }
+}
+
+private fun playSong(player: Player, index: Int, songCount: Int) {
     if (index in 0 until songCount) {
         player.seekTo(index, 0L)
         player.play()
@@ -398,6 +533,7 @@ private fun SearchHeader(
     isDark: Boolean,
     onToggleTheme: () -> Unit
 ) {
+    val keyboardController = LocalSoftwareKeyboardController.current
     Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -427,7 +563,9 @@ private fun SearchHeader(
                 }
             },
             singleLine = true,
-            shape = RoundedCornerShape(18.dp)
+            shape = RoundedCornerShape(18.dp),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { keyboardController?.hide() })
         )
     }
 }
@@ -492,6 +630,7 @@ private fun FeaturedCard(title: String, subtitle: String, onClick: () -> Unit) {
             .padding(horizontal = 18.dp, vertical = 8.dp)
             .clip(RoundedCornerShape(26.dp))
             .background(Brush.linearGradient(listOf(Purple, Color(0xFFB252B2), Coral)))
+            .border(1.dp, Color.White.copy(alpha = .28f), RoundedCornerShape(26.dp))
             .clickable(onClick = onClick)
             .padding(start = 20.dp, top = 20.dp, bottom = 20.dp, end = 16.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -683,7 +822,8 @@ private fun MiniPlayer(
     Surface(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
         shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .78f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = .12f)),
         tonalElevation = 2.dp
     ) {
         Row(
@@ -721,10 +861,27 @@ private fun FullPlayer(
     onSeek: (Long) -> Unit,
     onToggleFavorite: () -> Unit,
     onToggleShuffle: () -> Unit,
-    onToggleRepeat: () -> Unit
+    onToggleRepeat: () -> Unit,
+    onPreviousFromSwipe: () -> Unit,
+    onNextFromSwipe: () -> Unit
 ) {
+    val density = LocalDensity.current
+    val swipeThreshold = with(density) { 72.dp.toPx() }
     Column(
-        Modifier.fillMaxSize().navigationBarsPadding().padding(horizontal = 22.dp),
+        Modifier.fillMaxSize()
+            .navigationBarsPadding()
+            .padding(horizontal = 22.dp)
+            .pointerInput(onBack, swipeThreshold) {
+                var dragDistance = 0f
+                detectVerticalDragGestures(
+                    onVerticalDrag = { _, dragAmount -> dragDistance += dragAmount },
+                    onDragEnd = {
+                        if (dragDistance > swipeThreshold) onBack()
+                        dragDistance = 0f
+                    },
+                    onDragCancel = { dragDistance = 0f }
+                )
+            },
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Row(
@@ -736,7 +893,25 @@ private fun FullPlayer(
             Spacer(Modifier.width(48.dp))
         }
         Spacer(Modifier.weight(.3f))
-        AlbumTile(song, Modifier.fillMaxWidth().aspectRatio(1f).padding(horizontal = 12.dp))
+        AlbumTile(
+            song,
+            Modifier.fillMaxWidth().aspectRatio(1f).padding(horizontal = 12.dp)
+                .border(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = .12f), RoundedCornerShape(19.dp))
+                .pointerInput(song.id, swipeThreshold) {
+                    var dragDistance = 0f
+                    detectHorizontalDragGestures(
+                        onHorizontalDrag = { _, dragAmount -> dragDistance += dragAmount },
+                        onDragEnd = {
+                            when {
+                                dragDistance < -swipeThreshold -> onPreviousFromSwipe()
+                                dragDistance > swipeThreshold -> onNextFromSwipe()
+                            }
+                            dragDistance = 0f
+                        },
+                        onDragCancel = { dragDistance = 0f }
+                    )
+                }
+        )
         Spacer(Modifier.height(30.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {

@@ -20,6 +20,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.animateItemPlacement
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -31,11 +32,16 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -199,6 +205,7 @@ private fun PlayerApp(player: Player) {
         var searchQuery by remember { mutableStateOf("") }
         var debouncedQuery by remember { mutableStateOf("") }
         var currentIndex by remember { mutableIntStateOf(-1) }
+        var songTransitionDirection by remember { mutableIntStateOf(1) }
         var isPlaying by remember { mutableStateOf(false) }
         var position by remember { mutableLongStateOf(0L) }
         var duration by remember { mutableLongStateOf(0L) }
@@ -222,7 +229,11 @@ private fun PlayerApp(player: Player) {
                 }
 
                 override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
-                    currentIndex = player.currentMediaItemIndex
+                    val nextIndex = player.currentMediaItemIndex
+                    if (currentIndex >= 0 && nextIndex != currentIndex) {
+                        songTransitionDirection = if (nextIndex > currentIndex) 1 else -1
+                    }
+                    currentIndex = nextIndex
                     duration = player.duration.coerceAtLeast(0L)
                     position = 0L
                 }
@@ -270,6 +281,10 @@ private fun PlayerApp(player: Player) {
 
         val currentSong = songs.getOrNull(currentIndex)
         val favoriteSongs = songs.filter { it.id in favoriteIds }
+        val toggleFavorite: (Song) -> Unit = { song ->
+            favoriteIds = favoriteIds.toggle(song.id)
+            preferences.edit().putStringSet("favorites", favoriteIds.map(Long::toString).toSet()).apply()
+        }
         val visibleSongs = when (selectedTab) {
             MusicTab.Favorites -> favoriteSongs
             MusicTab.Search -> songs.filter {
@@ -307,38 +322,50 @@ private fun PlayerApp(player: Player) {
                     label = "player screen transition"
                 ) { showFullPlayer ->
                     if (showFullPlayer && currentSong != null) {
-                        FullPlayer(
-                            song = currentSong,
-                            isPlaying = isPlaying,
-                            isFavorite = currentSong.id in favoriteIds,
-                            position = position,
-                            duration = duration,
-                            shuffleEnabled = isShuffleEnabled,
-                            repeatMode = repeatMode,
-                            onBack = { isPlayerOpen = false },
-                            onTogglePlay = { if (isPlaying) player.pause() else player.play() },
-                            onPrevious = { player.seekToPreviousMediaItem() },
-                            onNext = { player.seekToNextMediaItem() },
-                            onSeek = { position = it; player.seekTo(it) },
-                            onToggleFavorite = {
-                                favoriteIds = favoriteIds.toggle(currentSong.id)
-                                preferences.edit().putStringSet("favorites", favoriteIds.map(Long::toString).toSet()).apply()
-                            },
-                            onToggleShuffle = {
-                                isShuffleEnabled = !isShuffleEnabled
-                                player.shuffleModeEnabled = isShuffleEnabled
-                            },
-                            onToggleRepeat = {
-                                repeatMode = when (repeatMode) {
-                                    Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
-                                    Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
-                                    else -> Player.REPEAT_MODE_OFF
+                        AnimatedContent(
+                            targetState = currentSong,
+                            contentKey = { it.id },
+                            transitionSpec = {
+                                if (songTransitionDirection > 0) {
+                                    (slideInHorizontally { it } + fadeIn()) togetherWith
+                                        (slideOutHorizontally { -it } + fadeOut())
+                                } else {
+                                    (slideInHorizontally { -it } + fadeIn()) togetherWith
+                                        (slideOutHorizontally { it } + fadeOut())
                                 }
-                                player.repeatMode = repeatMode
                             },
-                            onPreviousFromSwipe = { player.seekToPreviousMediaItem() },
-                            onNextFromSwipe = { player.seekToNextMediaItem() }
-                        )
+                            label = "track slide transition"
+                        ) { displayedSong ->
+                            FullPlayer(
+                                song = displayedSong,
+                                isPlaying = isPlaying,
+                                isFavorite = displayedSong.id in favoriteIds,
+                                position = position,
+                                duration = duration,
+                                shuffleEnabled = isShuffleEnabled,
+                                repeatMode = repeatMode,
+                                onBack = { isPlayerOpen = false },
+                                onTogglePlay = { if (isPlaying) player.pause() else player.play() },
+                                onPrevious = { player.seekToPreviousMediaItem() },
+                                onNext = { player.seekToNextMediaItem() },
+                                onSeek = { position = it; player.seekTo(it) },
+                                onToggleFavorite = { toggleFavorite(displayedSong) },
+                                onToggleShuffle = {
+                                    isShuffleEnabled = !isShuffleEnabled
+                                    player.shuffleModeEnabled = isShuffleEnabled
+                                },
+                                onToggleRepeat = {
+                                    repeatMode = when (repeatMode) {
+                                        Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+                                        Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+                                        else -> Player.REPEAT_MODE_OFF
+                                    }
+                                    player.repeatMode = repeatMode
+                                },
+                                onPreviousFromSwipe = { player.seekToPreviousMediaItem() },
+                                onNextFromSwipe = { player.seekToNextMediaItem() }
+                            )
+                        }
                     } else {
                         Column(Modifier.fillMaxSize()) {
                             if (selectedTab == MusicTab.Search) {
@@ -384,12 +411,16 @@ private fun PlayerApp(player: Player) {
                                             songs = songs,
                                             currentIndex = currentIndex,
                                             isPlaying = isPlaying,
+                                            favoriteIds = favoriteIds,
+                                            onToggleFavorite = toggleFavorite,
                                             onPlay = { playSong(player, it, songs.size); isPlayerOpen = true }
                                         )
                                         MusicTab.Search -> SongList(
                                             songs = visibleSongs,
                                             currentSongId = currentSong?.id,
                                             isPlaying = isPlaying,
+                                            favoriteIds = favoriteIds,
+                                            onToggleFavorite = toggleFavorite,
                                             emptyMessage = "Axtarışa uyğun mahnı tapılmadı",
                                             onPlay = { playSong(player, it, songs); isPlayerOpen = true }
                                         )
@@ -397,6 +428,8 @@ private fun PlayerApp(player: Player) {
                                             songs = visibleSongs,
                                             currentSongId = currentSong?.id,
                                             isPlaying = isPlaying,
+                                            favoriteIds = favoriteIds,
+                                            onToggleFavorite = toggleFavorite,
                                             emptyMessage = "Sevimlilərə mahnı əlavə etməmisən",
                                             onPlay = { playSong(player, it, songs); isPlayerOpen = true }
                                         )
@@ -404,6 +437,8 @@ private fun PlayerApp(player: Player) {
                                             songs = songs,
                                             currentIndex = currentIndex,
                                             isPlaying = isPlaying,
+                                            favoriteIds = favoriteIds,
+                                            onToggleFavorite = toggleFavorite,
                                             onPlay = { playSong(player, it, songs.size); isPlayerOpen = true }
                                         )
                                     }
@@ -429,32 +464,7 @@ private fun PlayerApp(player: Player) {
                     }
                 }
                 if (!isPlayerOpen) {
-                    NavigationBar(
-                        modifier = Modifier.border(
-                            BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
-                        ),
-                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = .82f),
-                        tonalElevation = 2.dp
-                    ) {
-                        MusicTab.entries.forEach { tab ->
-                            NavigationBarItem(
-                                selected = selectedTab == tab,
-                                onClick = { selectedTab = tab },
-                                icon = {
-                                    Icon(
-                                        imageVector = when (tab) {
-                                            MusicTab.Home -> Icons.Default.Home
-                                            MusicTab.Search -> Icons.Default.Search
-                                            MusicTab.Favorites -> Icons.Default.Favorite
-                                            MusicTab.Library -> Icons.Default.LibraryMusic
-                                        },
-                                        contentDescription = tab.label
-                                    )
-                                },
-                                label = { Text(tab.label, maxLines = 1) }
-                            )
-                        }
-                    }
+                    LiquidTabBar(selectedTab = selectedTab, onSelect = { selectedTab = it })
                 }
             }
             }
@@ -505,31 +515,136 @@ private fun HomeHeader(
     onToggleTheme: () -> Unit
 ) {
     Row(
-        Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 12.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
-            Text(
-                if (tab == MusicTab.Home) "Salam, musiqisevər 👋" else tab.label,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.GraphicEq,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(17.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "MELODIA",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    letterSpacing = MaterialTheme.typography.labelMedium.letterSpacing
+                )
+            }
+            Spacer(Modifier.height(4.dp))
             Text(
                 when (tab) {
-                    MusicTab.Home -> "Musiqi dünyana xoş gəldin"
+                    MusicTab.Home -> "Musiqi səninlə"
                     MusicTab.Favorites -> "Ən sevdiyin mahnılar"
                     MusicTab.Library -> "Bütün musiqilərin bir yerdə"
                     MusicTab.Search -> tab.label
                 },
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
-        IconButton(onClick = onToggleTheme) {
-            Icon(
-                if (isDark) Icons.Default.LightMode else Icons.Default.DarkMode,
-                contentDescription = if (isDark) "Açıq rejimə keç" else "Qaranlıq rejimə keç"
+        Surface(
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surface.copy(alpha = .72f),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = .10f))
+        ) {
+            IconButton(onClick = onToggleTheme, modifier = Modifier.size(44.dp)) {
+                Icon(
+                    if (isDark) Icons.Default.LightMode else Icons.Default.DarkMode,
+                    contentDescription = if (isDark) "Açıq rejimə keç" else "Qaranlıq rejimə keç",
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LiquidTabBar(selectedTab: MusicTab, onSelect: (MusicTab) -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .navigationBarsPadding()
+            .padding(bottom = 8.dp),
+        shape = RoundedCornerShape(30.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = .68f),
+        border = BorderStroke(
+            1.dp,
+            Brush.linearGradient(
+                listOf(
+                    MaterialTheme.colorScheme.onSurface.copy(alpha = .24f),
+                    MaterialTheme.colorScheme.primary.copy(alpha = .28f),
+                    MaterialTheme.colorScheme.onSurface.copy(alpha = .08f)
+                )
             )
+        ),
+        shadowElevation = 12.dp,
+        tonalElevation = 4.dp
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            MusicTab.entries.forEach { tab ->
+                val selected = selectedTab == tab
+                val tint by animateColorAsState(
+                    targetValue = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    animationSpec = spring(stiffness = 500f),
+                    label = "tab tint"
+                )
+                val scale by animateFloatAsState(
+                    targetValue = if (selected) 1.08f else 1f,
+                    animationSpec = spring(stiffness = 500f),
+                    label = "tab icon scale"
+                )
+                val selectedColor by animateColorAsState(
+                    targetValue = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = .15f)
+                    else Color.Transparent,
+                    animationSpec = spring(stiffness = 500f),
+                    label = "tab glass highlight"
+                )
+                val icon = when (tab) {
+                    MusicTab.Home -> Icons.Default.Home
+                    MusicTab.Search -> Icons.Default.Search
+                    MusicTab.Favorites -> Icons.Default.Favorite
+                    MusicTab.Library -> Icons.Default.LibraryMusic
+                }
+                Column(
+                    Modifier.weight(1f)
+                        .height(56.dp)
+                        .clip(CircleShape)
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(selectedColor, selectedColor.copy(alpha = selectedColor.alpha * .55f))
+                            )
+                        )
+                        .clickable { onSelect(tab) },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        icon,
+                        contentDescription = tab.label,
+                        tint = tint,
+                        modifier = Modifier.size(21.dp * scale)
+                    )
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        tab.label,
+                        color = tint,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines = 1
+                    )
+                }
+            }
         }
     }
 }
@@ -542,19 +657,29 @@ private fun SearchHeader(
     onToggleTheme: () -> Unit
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
-    Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 12.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
+        Row(
+            Modifier.fillMaxWidth().padding(bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
-                "Musiqi axtar",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
+                "Kəşf et",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f)
             )
-            IconButton(onClick = onToggleTheme) {
-                Icon(
-                    if (isDark) Icons.Default.LightMode else Icons.Default.DarkMode,
-                    contentDescription = if (isDark) "Açıq rejimə keç" else "Qaranlıq rejimə keç"
-                )
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surface.copy(alpha = .72f),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = .10f))
+            ) {
+                IconButton(onClick = onToggleTheme, modifier = Modifier.size(44.dp)) {
+                    Icon(
+                        if (isDark) Icons.Default.LightMode else Icons.Default.DarkMode,
+                        contentDescription = if (isDark) "Açıq rejimə keç" else "Qaranlıq rejimə keç",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
         OutlinedTextField(
@@ -571,7 +696,11 @@ private fun SearchHeader(
                 }
             },
             singleLine = true,
-            shape = RoundedCornerShape(18.dp),
+            shape = RoundedCornerShape(20.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                unfocusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = .62f),
+                focusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = .82f)
+            ),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             keyboardActions = KeyboardActions(onSearch = { keyboardController?.hide() })
         )
@@ -583,6 +712,8 @@ private fun HomeContent(
     songs: List<Song>,
     currentIndex: Int,
     isPlaying: Boolean,
+    favoriteIds: Set<Long>,
+    onToggleFavorite: (Song) -> Unit,
     onPlay: (Int) -> Unit
 ) {
     LazyColumn(
@@ -604,18 +735,13 @@ private fun HomeContent(
         }
         items(songs.take(5), key = { it.id }) { song ->
             SongRow(
+                modifier = Modifier.animateItemPlacement(animationSpec = spring()),
                 song = song,
                 isPlaying = isPlaying && songs.getOrNull(currentIndex)?.id == song.id,
                 onClick = { onPlay(songs.indexOf(song)) },
-                trailing = {
-                    IconButton(onClick = { onPlay(songs.indexOf(song)) }) {
-                        Icon(
-                            if (songs.getOrNull(currentIndex)?.id == song.id && isPlaying)
-                                Icons.Default.Equalizer else Icons.Default.PlayArrow,
-                            contentDescription = "Oynat"
-                        )
-                    }
-                }
+                isFavorite = song.id in favoriteIds,
+                onToggleFavorite = { onToggleFavorite(song) },
+                onPlay = { onPlay(songs.indexOf(song)) }
             )
         }
         if (songs.size > 5) {
@@ -686,6 +812,8 @@ private fun SongList(
     songs: List<Song>,
     currentSongId: Long?,
     isPlaying: Boolean,
+    favoriteIds: Set<Long>,
+    onToggleFavorite: (Song) -> Unit,
     emptyMessage: String,
     onPlay: (Song) -> Unit
 ) {
@@ -705,9 +833,13 @@ private fun SongList(
             item { SectionHeading("${songs.size} mahnı") }
             items(songs, key = { it.id }) { song ->
                 SongRow(
+                    modifier = Modifier.animateItemPlacement(animationSpec = spring()),
                     song = song,
                     isPlaying = isPlaying && song.id == currentSongId,
-                    onClick = { onPlay(song) }
+                    onClick = { onPlay(song) },
+                    isFavorite = song.id in favoriteIds,
+                    onToggleFavorite = { onToggleFavorite(song) },
+                    onPlay = { onPlay(song) }
                 )
             }
         }
@@ -719,6 +851,8 @@ private fun LibraryContent(
     songs: List<Song>,
     currentIndex: Int,
     isPlaying: Boolean,
+    favoriteIds: Set<Long>,
+    onToggleFavorite: (Song) -> Unit,
     onPlay: (Int) -> Unit
 ) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 18.dp)) {
@@ -727,9 +861,13 @@ private fun LibraryContent(
         }
         items(songs, key = { it.id }) { song ->
             SongRow(
+                modifier = Modifier.animateItemPlacement(animationSpec = spring()),
                 song = song,
                 isPlaying = isPlaying && songs.getOrNull(currentIndex)?.id == song.id,
-                onClick = { onPlay(songs.indexOf(song)) }
+                onClick = { onPlay(songs.indexOf(song)) },
+                isFavorite = song.id in favoriteIds,
+                onToggleFavorite = { onToggleFavorite(song) },
+                onPlay = { onPlay(songs.indexOf(song)) }
             )
         }
     }
@@ -737,41 +875,97 @@ private fun LibraryContent(
 
 @Composable
 private fun SongRow(
+    modifier: Modifier = Modifier,
     song: Song,
     isPlaying: Boolean,
     onClick: () -> Unit,
-    trailing: (@Composable () -> Unit)? = null
+    isFavorite: Boolean,
+    onToggleFavorite: () -> Unit,
+    onPlay: () -> Unit
 ) {
-    Row(
-        Modifier.fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically
+    androidx.compose.animation.AnimatedVisibility(
+        visible = true,
+        enter = fadeIn(animationSpec = tween(180)) +
+            slideInVertically(animationSpec = tween(180)) { it / 8 }
     ) {
-        AlbumTile(song = song, modifier = Modifier.size(52.dp))
-        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-            Text(
-                song.title,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = if (isPlaying) FontWeight.Bold else FontWeight.Medium,
-                color = if (isPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                song.artist,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+        Row(
+            modifier.fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(horizontal = 18.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AlbumTile(song = song, modifier = Modifier.size(52.dp))
+            Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Text(
+                    song.title,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = if (isPlaying) FontWeight.Bold else FontWeight.Medium,
+                    color = if (isPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    song.artist,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            SongActionsMenu(
+                songTitle = song.title,
+                isFavorite = isFavorite,
+                onToggleFavorite = onToggleFavorite,
+                onPlay = onPlay
             )
         }
-        trailing?.invoke() ?: Icon(
-            Icons.Default.MoreVert,
-            contentDescription = "Mahnı seçimləri",
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp)
-        )
+    }
+}
+
+@Composable
+private fun SongActionsMenu(
+    songTitle: String,
+    isFavorite: Boolean,
+    onToggleFavorite: () -> Unit,
+    onPlay: () -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(
+                Icons.Default.MoreVert,
+                contentDescription = "$songTitle üçün əməliyyatlar",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.clip(RoundedCornerShape(18.dp))
+                .border(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = .12f), RoundedCornerShape(18.dp))
+        ) {
+            DropdownMenuItem(
+                text = { Text(if (isFavorite) "Sevimlilərdən sil" else "Sevimlilərə əlavə et") },
+                leadingIcon = {
+                    Icon(
+                        if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                        contentDescription = null
+                    )
+                },
+                onClick = {
+                    expanded = false
+                    onToggleFavorite()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("İndi oxut") },
+                leadingIcon = { Icon(Icons.Default.PlayArrow, contentDescription = null) },
+                onClick = {
+                    expanded = false
+                    onPlay()
+                }
+            )
+        }
     }
 }
 

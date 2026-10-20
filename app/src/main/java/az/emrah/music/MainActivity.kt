@@ -288,7 +288,7 @@ private fun PlayerApp() {
                                     currentSongId = currentSong?.id,
                                     isPlaying = isPlaying,
                                     emptyMessage = "Axtarışa uyğun mahnı tapılmadı",
-                                    onPlay = { playSong(player, it, songs.size); isPlayerOpen = true }
+                                    onPlay = { playSong(player, songs.indexOf(it), songs.size); isPlayerOpen = true }
                                 )
                                 MusicTab.Favorites -> SongList(
                                     songs = visibleSongs,

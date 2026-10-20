@@ -2,184 +2,832 @@ package az.emrah.music
 
 import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import java.io.FileNotFoundException
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.Image
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
-data class Song(val id: Long, val title: String, val artist: String, val uri: Uri)
+private data class Song(
+    val id: Long,
+    val title: String,
+    val artist: String,
+    val albumId: Long,
+    val uri: Uri
+)
+
+private enum class MusicTab(val label: String) {
+    Home("Ana səhifə"),
+    Search("Axtar"),
+    Favorites("Sevimlilər"),
+    Library("Kitabxana")
+}
+
+private val Purple = Color(0xFF7856E8)
+private val Coral = Color(0xFFFF8B74)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
-                Surface(Modifier.fillMaxSize()) { PlayerApp() }
-            }
-        }
+        setContent { PlayerApp() }
     }
 }
 
-fun loadSongs(ctx: Context): List<Song> {
-    val list = mutableListOf<Song>()
-    val collection = if (Build.VERSION.SDK_INT >= 29)
+private fun loadSongs(ctx: Context): List<Song> {
+    val songs = mutableListOf<Song>()
+    val collection = if (Build.VERSION.SDK_INT >= 29) {
         MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-    else MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+    } else {
+        MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+    }
     val projection = arrayOf(
         MediaStore.Audio.Media._ID,
         MediaStore.Audio.Media.TITLE,
-        MediaStore.Audio.Media.ARTIST
+        MediaStore.Audio.Media.ARTIST,
+        MediaStore.Audio.Media.ALBUM_ID
     )
     ctx.contentResolver.query(
-        collection, projection,
-        "${MediaStore.Audio.Media.IS_MUSIC} != 0", null,
-        "${MediaStore.Audio.Media.TITLE} ASC"
-    )?.use { c ->
-        val idCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
-        val titleCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
-        val artistCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
-        while (c.moveToNext()) {
-            val id = c.getLong(idCol)
-            list += Song(
-                id,
-                c.getString(titleCol) ?: "Naməlum",
-                c.getString(artistCol)?.takeIf { it != "<unknown>" } ?: "Naməlum ifaçı",
-                Uri.withAppendedPath(collection, id.toString())
+        collection,
+        projection,
+        "${MediaStore.Audio.Media.IS_MUSIC} != 0",
+        null,
+        "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC"
+    )?.use { cursor ->
+        val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+        val titleColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+        val artistColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+        val albumIdColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
+        while (cursor.moveToNext()) {
+            val id = cursor.getLong(idColumn)
+            songs += Song(
+                id = id,
+                title = cursor.getString(titleColumn)?.takeIf(String::isNotBlank) ?: "Naməlum mahnı",
+                artist = cursor.getString(artistColumn)
+                    ?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: "Naməlum ifaçı",
+                albumId = cursor.getLong(albumIdColumn),
+                uri = Uri.withAppendedPath(collection, id.toString())
             )
         }
     }
-    return list
+    return songs
 }
 
 @Composable
-fun PlayerApp() {
-    val ctx = LocalContext.current
-    val permission = if (Build.VERSION.SDK_INT >= 33)
-        Manifest.permission.READ_MEDIA_AUDIO
-    else Manifest.permission.READ_EXTERNAL_STORAGE
-
-    var songs by remember { mutableStateOf<List<Song>>(emptyList()) }
-    var granted by remember {
-        mutableStateOf(ContextCompat.checkSelfPermission(ctx, permission) ==
-                android.content.pm.PackageManager.PERMISSION_GRANTED)
+private fun PlayerApp() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val preferences = remember { context.getSharedPreferences("music_preferences", Context.MODE_PRIVATE) }
+    var isDark by remember { mutableStateOf(preferences.getBoolean("dark_mode", true)) }
+    val colors = if (isDark) {
+        darkColorScheme(
+            primary = Color(0xFFB9A4FF),
+            secondary = Coral,
+            background = Color(0xFF101016),
+            surface = Color(0xFF191820),
+            surfaceVariant = Color(0xFF25232D)
+        )
+    } else {
+        lightColorScheme(
+            primary = Purple,
+            secondary = Color(0xFFD65F4C),
+            background = Color(0xFFF8F7FC),
+            surface = Color(0xFFFFFFFF),
+            surfaceVariant = Color(0xFFF0EDF7)
+        )
     }
-    var current by remember { mutableIntStateOf(-1) }
-    var isPlaying by remember { mutableStateOf(false) }
-    var position by remember { mutableLongStateOf(0L) }
-    var duration by remember { mutableLongStateOf(0L) }
 
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        granted = it
-    }
-
-    val player = remember { ExoPlayer.Builder(ctx).build() }
-    DisposableEffect(Unit) {
-        val listener = object : Player.Listener {
-            override fun onIsPlayingChanged(playing: Boolean) { isPlaying = playing }
-            override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
-                current = player.currentMediaItemIndex
-                duration = maxOf(player.duration, 0L)
-            }
-            override fun onPlaybackStateChanged(state: Int) {
-                duration = maxOf(player.duration, 0L)
-            }
+    MaterialTheme(colorScheme = colors) {
+        val permission = if (Build.VERSION.SDK_INT >= 33) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
         }
-        player.addListener(listener)
-        onDispose { player.removeListener(listener); player.release() }
-    }
-
-    LaunchedEffect(granted) {
-        if (granted) {
-            songs = loadSongs(ctx)
-            player.setMediaItems(songs.map { MediaItem.fromUri(it.uri) })
-            player.prepare()
+        var hasPermission by remember {
+            mutableStateOf(
+                ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+            )
         }
-    }
-    LaunchedEffect(isPlaying) {
-        while (isPlaying) { position = player.currentPosition; delay(500) }
-    }
+        var songs by remember { mutableStateOf(emptyList<Song>()) }
+        var selectedTab by remember { mutableStateOf(MusicTab.Home) }
+        var searchQuery by remember { mutableStateOf("") }
+        var currentIndex by remember { mutableIntStateOf(-1) }
+        var isPlaying by remember { mutableStateOf(false) }
+        var position by remember { mutableLongStateOf(0L) }
+        var duration by remember { mutableLongStateOf(0L) }
+        var isPlayerOpen by remember { mutableStateOf(false) }
+        var isShuffleEnabled by remember { mutableStateOf(false) }
+        var repeatMode by remember { mutableIntStateOf(Player.REPEAT_MODE_OFF) }
+        var favoriteIds by remember {
+            mutableStateOf(
+                preferences.getStringSet("favorites", emptySet()).orEmpty().mapNotNull(String::toLongOrNull).toSet()
+            )
+        }
 
-    Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        Text("Musiqi", style = MaterialTheme.typography.headlineMedium,
-            modifier = Modifier.padding(16.dp))
+        val permissionLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { hasPermission = it }
+        val player = remember { ExoPlayer.Builder(context).build() }
 
-        when {
-            !granted -> Column(
-                Modifier.weight(1f).fillMaxWidth(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text("Mahnıları göstərmək üçün icazə lazımdır")
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = { launcher.launch(permission) }) { Text("İcazə ver") }
-            }
-            songs.isEmpty() -> Box(Modifier.weight(1f).fillMaxWidth(), Alignment.Center) {
-                Text("Telefonda mahnı tapılmadı")
-            }
-            else -> LazyColumn(Modifier.weight(1f)) {
-                itemsIndexed(songs) { i, s ->
-                    ListItem(
-                        headlineContent = {
-                            Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                color = if (i == current) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurface)
-                        },
-                        supportingContent = { Text(s.artist, maxLines = 1) },
-                        leadingContent = { Icon(Icons.Default.MusicNote, null) },
-                        modifier = Modifier.clickable {
-                            player.seekTo(i, 0L); player.play(); current = i
-                        }
-                    )
+        DisposableEffect(player) {
+            val listener = object : Player.Listener {
+                override fun onIsPlayingChanged(playing: Boolean) {
+                    isPlaying = playing
+                }
+
+                override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
+                    currentIndex = player.currentMediaItemIndex
+                    duration = player.duration.coerceAtLeast(0L)
+                    position = 0L
+                }
+
+                override fun onPlaybackStateChanged(state: Int) {
+                    duration = player.duration.coerceAtLeast(0L)
                 }
             }
+            player.addListener(listener)
+            onDispose {
+                player.removeListener(listener)
+                player.release()
+            }
         }
 
-        if (current in songs.indices) {
-            Surface(tonalElevation = 6.dp) {
-                Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(12.dp)) {
-                    Text(songs[current].title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.titleMedium)
-                    Slider(
-                        value = if (duration > 0) position.toFloat() / duration else 0f,
-                        onValueChange = { position = (it * duration).toLong() },
-                        onValueChangeFinished = { player.seekTo(position) }
+        LaunchedEffect(hasPermission) {
+            if (hasPermission) {
+                songs = loadSongs(context)
+                player.setMediaItems(songs.map { MediaItem.fromUri(it.uri) })
+                player.prepare()
+            }
+        }
+
+        LaunchedEffect(isPlaying) {
+            while (isPlaying) {
+                position = player.currentPosition.coerceAtLeast(0L)
+                delay(500)
+            }
+        }
+
+        val currentSong = songs.getOrNull(currentIndex)
+        val favoriteSongs = songs.filter { it.id in favoriteIds }
+        val visibleSongs = when (selectedTab) {
+            MusicTab.Favorites -> favoriteSongs
+            MusicTab.Search -> songs.filter {
+                it.title.contains(searchQuery, ignoreCase = true) ||
+                    it.artist.contains(searchQuery, ignoreCase = true)
+            }
+            else -> songs
+        }
+
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                if (isPlayerOpen && currentSong != null) {
+                    FullPlayer(
+                        song = currentSong,
+                        isPlaying = isPlaying,
+                        isFavorite = currentSong.id in favoriteIds,
+                        position = position,
+                        duration = duration,
+                        shuffleEnabled = isShuffleEnabled,
+                        repeatMode = repeatMode,
+                        onBack = { isPlayerOpen = false },
+                        onTogglePlay = { if (isPlaying) player.pause() else player.play() },
+                        onPrevious = { player.seekToPreviousMediaItem() },
+                        onNext = { player.seekToNextMediaItem() },
+                        onSeek = { position = it; player.seekTo(it) },
+                        onToggleFavorite = {
+                            favoriteIds = favoriteIds.toggle(currentSong.id)
+                            preferences.edit().putStringSet("favorites", favoriteIds.map(Long::toString).toSet()).apply()
+                        },
+                        onToggleShuffle = {
+                            isShuffleEnabled = !isShuffleEnabled
+                            player.shuffleModeEnabled = isShuffleEnabled
+                        },
+                        onToggleRepeat = {
+                            repeatMode = when (repeatMode) {
+                                Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+                                Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+                                else -> Player.REPEAT_MODE_OFF
+                            }
+                            player.repeatMode = repeatMode
+                        }
                     )
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { player.seekToPreviousMediaItem() }) {
-                            Icon(Icons.Default.SkipPrevious, "Əvvəlki")
+                } else {
+                    Column(Modifier.weight(1f)) {
+                        if (selectedTab == MusicTab.Search) {
+                            SearchHeader(
+                                query = searchQuery,
+                                onQueryChange = { searchQuery = it },
+                                isDark = isDark,
+                                onToggleTheme = {
+                                    isDark = !isDark
+                                    preferences.edit().putBoolean("dark_mode", isDark).apply()
+                                }
+                            )
+                        } else {
+                            HomeHeader(
+                                tab = selectedTab,
+                                isDark = isDark,
+                                onToggleTheme = {
+                                    isDark = !isDark
+                                    preferences.edit().putBoolean("dark_mode", isDark).apply()
+                                }
+                            )
                         }
-                        FilledIconButton(onClick = { if (isPlaying) player.pause() else player.play() }) {
-                            Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, "Oynat")
+
+                        if (!hasPermission) {
+                            PermissionPrompt(
+                                onRequestPermission = { permissionLauncher.launch(permission) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        } else if (songs.isEmpty()) {
+                            EmptyLibrary(modifier = Modifier.weight(1f))
+                        } else {
+                            when (selectedTab) {
+                                MusicTab.Home -> HomeContent(
+                                    songs = songs,
+                                    currentIndex = currentIndex,
+                                    isPlaying = isPlaying,
+                                    onPlay = { playSong(player, it, songs.size); isPlayerOpen = true }
+                                )
+                                MusicTab.Search -> SongList(
+                                    songs = visibleSongs,
+                                    currentSongId = currentSong?.id,
+                                    isPlaying = isPlaying,
+                                    emptyMessage = "Axtarışa uyğun mahnı tapılmadı",
+                                    onPlay = { playSong(player, it, songs.size); isPlayerOpen = true }
+                                )
+                                MusicTab.Favorites -> SongList(
+                                    songs = visibleSongs,
+                                    currentSongId = currentSong?.id,
+                                    isPlaying = isPlaying,
+                                    emptyMessage = "Sevimlilərə mahnı əlavə etməmisən",
+                                    onPlay = { playSong(player, songs.indexOf(it), songs.size); isPlayerOpen = true }
+                                )
+                                MusicTab.Library -> LibraryContent(
+                                    songs = songs,
+                                    currentIndex = currentIndex,
+                                    isPlaying = isPlaying,
+                                    onPlay = { playSong(player, it, songs.size); isPlayerOpen = true }
+                                )
+                            }
                         }
-                        IconButton(onClick = { player.seekToNextMediaItem() }) {
-                            Icon(Icons.Default.SkipNext, "Növbəti")
+                    }
+
+                    if (currentSong != null) {
+                        MiniPlayer(
+                            song = currentSong,
+                            isPlaying = isPlaying,
+                            onOpen = { isPlayerOpen = true },
+                            onTogglePlay = { if (isPlaying) player.pause() else player.play() },
+                            onNext = { player.seekToNextMediaItem() }
+                        )
+                    }
+                    NavigationBar(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 2.dp
+                    ) {
+                        MusicTab.entries.forEach { tab ->
+                            NavigationBarItem(
+                                selected = selectedTab == tab,
+                                onClick = { selectedTab = tab },
+                                icon = {
+                                    Icon(
+                                        imageVector = when (tab) {
+                                            MusicTab.Home -> Icons.Default.Home
+                                            MusicTab.Search -> Icons.Default.Search
+                                            MusicTab.Favorites -> Icons.Default.Favorite
+                                            MusicTab.Library -> Icons.Default.LibraryMusic
+                                        },
+                                        contentDescription = tab.label
+                                    )
+                                },
+                                label = { Text(tab.label, maxLines = 1) }
+                            )
                         }
                     }
                 }
             }
         }
+    }
+}
+
+private fun Set<Long>.toggle(id: Long): Set<Long> =
+    if (id in this) this - id else this + id
+
+private fun playSong(player: ExoPlayer, index: Int, songCount: Int) {
+    if (index in 0 until songCount) {
+        player.seekTo(index, 0L)
+        player.play()
+    }
+}
+
+@Composable
+private fun HomeHeader(
+    tab: MusicTab,
+    isDark: Boolean,
+    onToggleTheme: () -> Unit
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                if (tab == MusicTab.Home) "Salam, musiqisevər 👋" else tab.label,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                when (tab) {
+                    MusicTab.Home -> "Musiqi dünyana xoş gəldin"
+                    MusicTab.Favorites -> "Ən sevdiyin mahnılar"
+                    MusicTab.Library -> "Bütün musiqilərin bir yerdə"
+                    MusicTab.Search -> tab.label
+                },
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        IconButton(onClick = onToggleTheme) {
+            Icon(
+                if (isDark) Icons.Default.LightMode else Icons.Default.DarkMode,
+                contentDescription = if (isDark) "Açıq rejimə keç" else "Qaranlıq rejimə keç"
+            )
+        }
+    }
+}
+
+@Composable
+private fun SearchHeader(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    isDark: Boolean,
+    onToggleTheme: () -> Unit
+) {
+    Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Musiqi axtar",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(onClick = onToggleTheme) {
+                Icon(
+                    if (isDark) Icons.Default.LightMode else Icons.Default.DarkMode,
+                    contentDescription = if (isDark) "Açıq rejimə keç" else "Qaranlıq rejimə keç"
+                )
+            }
+        }
+        OutlinedTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("Mahnı və ya ifaçı axtar") },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+            trailingIcon = {
+                if (query.isNotEmpty()) {
+                    IconButton(onClick = { onQueryChange("") }) {
+                        Icon(Icons.Default.Close, contentDescription = "Axtarışı təmizlə")
+                    }
+                }
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(18.dp)
+        )
+    }
+}
+
+@Composable
+private fun HomeContent(
+    songs: List<Song>,
+    currentIndex: Int,
+    isPlaying: Boolean,
+    onPlay: (Int) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 18.dp)
+    ) {
+        item {
+            FeaturedCard(
+                title = "Musiqini hiss et",
+                subtitle = "Sevdiyin ritmlər, hər an səninlə",
+                onClick = { if (songs.isNotEmpty()) onPlay(0) }
+            )
+        }
+        item {
+            SectionHeading(
+                title = "Sənin musiqilərin",
+                subtitle = "${songs.size} mahnı"
+            )
+        }
+        items(songs.take(5), key = { it.id }) { song ->
+            SongRow(
+                song = song,
+                isPlaying = isPlaying && songs.getOrNull(currentIndex)?.id == song.id,
+                onClick = { onPlay(songs.indexOf(song)) },
+                trailing = {
+                    IconButton(onClick = { onPlay(songs.indexOf(song)) }) {
+                        Icon(
+                            if (songs.getOrNull(currentIndex)?.id == song.id && isPlaying)
+                                Icons.Default.Equalizer else Icons.Default.PlayArrow,
+                            contentDescription = "Oynat"
+                        )
+                    }
+                }
+            )
+        }
+        if (songs.size > 5) {
+            item {
+                Text(
+                    "Bütün mahnıları Kitabxana bölməsində görə bilərsən.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FeaturedCard(title: String, subtitle: String, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(26.dp))
+            .background(Brush.linearGradient(listOf(Purple, Color(0xFFB252B2), Coral)))
+            .clickable(onClick = onClick)
+            .padding(start = 20.dp, top = 20.dp, bottom = 20.dp, end = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("SƏNİN ÜÇÜN", style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = .8f))
+            Spacer(Modifier.height(8.dp))
+            Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = Color.White)
+            Spacer(Modifier.height(4.dp))
+            Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = Color.White.copy(alpha = .88f))
+            Spacer(Modifier.height(16.dp))
+            Surface(color = Color.White, shape = RoundedCornerShape(30.dp)) {
+                Row(
+                    Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.PlayArrow, null, tint = Purple, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("İndi dinlə", color = Purple, style = MaterialTheme.typography.labelLarge)
+                }
+            }
+        }
+        Icon(
+            Icons.Default.GraphicEq,
+            contentDescription = null,
+            tint = Color.White.copy(alpha = .88f),
+            modifier = Modifier.size(72.dp).padding(start = 10.dp)
+        )
+    }
+}
+
+@Composable
+private fun SectionHeading(title: String, subtitle: String? = null) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+        subtitle?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    }
+}
+
+@Composable
+private fun SongList(
+    songs: List<Song>,
+    currentSongId: Long?,
+    isPlaying: Boolean,
+    emptyMessage: String,
+    onPlay: (Song) -> Unit
+) {
+    if (songs.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Default.MusicOff, null, modifier = Modifier.size(46.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.height(12.dp))
+                Text(emptyMessage, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    } else {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 18.dp)
+        ) {
+            item { SectionHeading("${songs.size} mahnı") }
+            items(songs, key = { it.id }) { song ->
+                SongRow(
+                    song = song,
+                    isPlaying = isPlaying && song.id == currentSongId,
+                    onClick = { onPlay(song) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LibraryContent(
+    songs: List<Song>,
+    currentIndex: Int,
+    isPlaying: Boolean,
+    onPlay: (Int) -> Unit
+) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 18.dp)) {
+        item {
+            SectionHeading("Bütün mahnılar", "${songs.size} mahnı")
+        }
+        items(songs, key = { it.id }) { song ->
+            SongRow(
+                song = song,
+                isPlaying = isPlaying && songs.getOrNull(currentIndex)?.id == song.id,
+                onClick = { onPlay(songs.indexOf(song)) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun SongRow(
+    song: Song,
+    isPlaying: Boolean,
+    onClick: () -> Unit,
+    trailing: (@Composable () -> Unit)? = null
+) {
+    Row(
+        Modifier.fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        AlbumTile(song = song, modifier = Modifier.size(52.dp))
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            Text(
+                song.title,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = if (isPlaying) FontWeight.Bold else FontWeight.Medium,
+                color = if (isPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                song.artist,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        trailing?.invoke() ?: Icon(
+            Icons.Default.MoreVert,
+            contentDescription = "Mahnı seçimləri",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp)
+        )
+    }
+}
+
+@Composable
+private fun AlbumTile(song: Song, modifier: Modifier = Modifier) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val palettes = listOf(
+        listOf(Color(0xFF7356D8), Color(0xFFB779E5)),
+        listOf(Color(0xFFDF6B66), Color(0xFFF2AA70)),
+        listOf(Color(0xFF318F91), Color(0xFF69C7A9)),
+        listOf(Color(0xFF4058A7), Color(0xFF7D94E4)),
+        listOf(Color(0xFFB44F84), Color(0xFFE795AE))
+    )
+    val palette = palettes[(song.id % palettes.size).toInt()]
+    val artwork by produceState<ImageBitmap?>(initialValue = null, song.albumId) {
+        value = if (song.albumId > 0L) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val artworkUri = Uri.parse("content://media/external/audio/albumart/${song.albumId}")
+                    context.contentResolver.openInputStream(artworkUri)?.use {
+                        BitmapFactory.decodeStream(it)?.asImageBitmap()
+                    }
+                } catch (_: FileNotFoundException) {
+                    null
+                }
+            }
+        } else {
+            null
+        }
+    }
+    Box(
+        modifier.clip(RoundedCornerShape(15.dp))
+            .background(Brush.linearGradient(palette)),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(Icons.Default.MusicNote, null, tint = Color.White.copy(alpha = .92f), modifier = Modifier.size(25.dp))
+        artwork?.let {
+            Image(
+                bitmap = it,
+                contentDescription = "${song.title} albom üzlüyü",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
+}
+
+@Composable
+private fun MiniPlayer(
+    song: Song,
+    isPlaying: Boolean,
+    onOpen: () -> Unit,
+    onTogglePlay: () -> Unit,
+    onNext: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = 2.dp
+    ) {
+        Row(
+            Modifier.clickable(onClick = onOpen).padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AlbumTile(song, Modifier.size(42.dp))
+            Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
+                Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
+                Text(song.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+            }
+            IconButton(onClick = onTogglePlay) {
+                Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, "Oynat və ya dayandır")
+            }
+            IconButton(onClick = onNext) {
+                Icon(Icons.Default.SkipNext, "Növbəti mahnı")
+            }
+        }
+    }
+}
+
+@Composable
+private fun FullPlayer(
+    song: Song,
+    isPlaying: Boolean,
+    isFavorite: Boolean,
+    position: Long,
+    duration: Long,
+    shuffleEnabled: Boolean,
+    repeatMode: Int,
+    onBack: () -> Unit,
+    onTogglePlay: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onSeek: (Long) -> Unit,
+    onToggleFavorite: () -> Unit,
+    onToggleShuffle: () -> Unit,
+    onToggleRepeat: () -> Unit
+) {
+    Column(
+        Modifier.fillMaxSize().navigationBarsPadding().padding(horizontal = 22.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) { Icon(Icons.Default.KeyboardArrowDown, "Pleyeri bağla") }
+            Text("İndi oxudulur", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+            Spacer(Modifier.width(48.dp))
+        }
+        Spacer(Modifier.weight(.3f))
+        AlbumTile(song, Modifier.fillMaxWidth().aspectRatio(1f).padding(horizontal = 12.dp))
+        Spacer(Modifier.height(30.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(song.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(4.dp))
+                Text(song.artist, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            IconButton(onClick = onToggleFavorite) {
+                Icon(
+                    if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                    contentDescription = if (isFavorite) "Sevimlilərdən çıxar" else "Sevimlilərə əlavə et",
+                    tint = if (isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        Slider(
+            value = if (duration > 0L) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f,
+            onValueChange = { onSeek((it * duration).toLong()) },
+            enabled = duration > 0L
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(formatTime(position), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(formatTime(duration), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.height(14.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onToggleShuffle) {
+                Icon(Icons.Default.Shuffle, "Qarışıq oxutma", tint = if (shuffleEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            IconButton(onClick = onPrevious) { Icon(Icons.Default.SkipPrevious, "Əvvəlki mahnı", modifier = Modifier.size(34.dp)) }
+            FilledIconButton(
+                onClick = onTogglePlay,
+                modifier = Modifier.size(68.dp),
+                shape = CircleShape
+            ) {
+                Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, "Oynat və ya dayandır", modifier = Modifier.size(34.dp))
+            }
+            IconButton(onClick = onNext) { Icon(Icons.Default.SkipNext, "Növbəti mahnı", modifier = Modifier.size(34.dp)) }
+            IconButton(onClick = onToggleRepeat) {
+                Icon(
+                    if (repeatMode == Player.REPEAT_MODE_ONE) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                    "Təkrar rejimi",
+                    tint = if (repeatMode != Player.REPEAT_MODE_OFF) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Spacer(Modifier.weight(.7f))
+    }
+}
+
+private fun formatTime(milliseconds: Long): String {
+    val totalSeconds = milliseconds.coerceAtLeast(0L) / 1000
+    return "%d:%02d".format(totalSeconds / 60, totalSeconds % 60)
+}
+
+@Composable
+private fun PermissionPrompt(onRequestPermission: () -> Unit, modifier: Modifier = Modifier) {
+    Column(
+        modifier.fillMaxWidth().padding(28.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(Icons.Default.LibraryMusic, null, modifier = Modifier.size(58.dp), tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(16.dp))
+        Text("Musiqilərinə qulaq as", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Telefonundakı mahnıları göstərmək üçün media icazəsi lazımdır.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(18.dp))
+        Button(onClick = onRequestPermission) { Text("İcazə ver") }
+    }
+}
+
+@Composable
+private fun EmptyLibrary(modifier: Modifier = Modifier) {
+    Column(
+        modifier.fillMaxWidth().padding(28.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(Icons.Default.MusicOff, null, modifier = Modifier.size(54.dp), tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(14.dp))
+        Text("Hələ mahnı yoxdur", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(6.dp))
+        Text("Musiqi fayllarını cihazına əlavə etdikdən sonra burada görünəcək.", color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

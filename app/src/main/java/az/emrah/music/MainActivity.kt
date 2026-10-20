@@ -341,77 +341,84 @@ private fun PlayerApp(player: Player) {
                         )
                     } else {
                         Column(Modifier.fillMaxSize()) {
-                        if (selectedTab == MusicTab.Search) {
-                            SearchHeader(
-                                query = searchQuery,
-                                onQueryChange = { searchQuery = it },
-                                isDark = isDark,
-                                onToggleTheme = {
-                                    isDark = !isDark
-                                    preferences.edit().putBoolean("dark_mode", isDark).apply()
-                                }
-                            )
-                        } else {
-                            HomeHeader(
-                                tab = selectedTab,
-                                isDark = isDark,
-                                onToggleTheme = {
-                                    isDark = !isDark
-                                    preferences.edit().putBoolean("dark_mode", isDark).apply()
-                                }
-                            )
-                        }
-
-                        if (!hasPermission) {
-                            PermissionPrompt(
-                                onRequestPermission = { permissionLauncher.launch(permission) },
-                                modifier = Modifier.weight(1f)
-                            )
-                        } else if (songs.isEmpty()) {
-                            EmptyLibrary(modifier = Modifier.weight(1f))
-                        } else {
-                            AnimatedContent(
-                                targetState = selectedTab,
-                                modifier = Modifier.weight(1f),
-                                transitionSpec = {
-                                    (fadeIn() + slideInHorizontally { it / 12 }) togetherWith
-                                        (fadeOut() + slideOutHorizontally { -it / 12 })
-                                },
-                                label = "tab transition"
-                            ) { tab ->
-                            when (tab) {
-                                MusicTab.Home -> HomeContent(
-                                    songs = songs,
-                                    currentIndex = currentIndex,
-                                    isPlaying = isPlaying,
-                                    onPlay = { playSong(player, it, songs.size); isPlayerOpen = true }
+                            if (selectedTab == MusicTab.Search) {
+                                SearchHeader(
+                                    query = searchQuery,
+                                    onQueryChange = { searchQuery = it },
+                                    isDark = isDark,
+                                    onToggleTheme = {
+                                        isDark = !isDark
+                                        preferences.edit().putBoolean("dark_mode", isDark).apply()
+                                    }
                                 )
-                                MusicTab.Search -> SongList(
-                                    songs = visibleSongs,
-                                    currentSongId = currentSong?.id,
-                                    isPlaying = isPlaying,
-                                    emptyMessage = "Axtarışa uyğun mahnı tapılmadı",
-                                    onPlay = { playSong(player, it, songs); isPlayerOpen = true }
-                                )
-                                MusicTab.Favorites -> SongList(
-                                    songs = visibleSongs,
-                                    currentSongId = currentSong?.id,
-                                    isPlaying = isPlaying,
-                                    emptyMessage = "Sevimlilərə mahnı əlavə etməmisən",
-                                    onPlay = { playSong(player, it, songs); isPlayerOpen = true }
-                                )
-                                MusicTab.Library -> LibraryContent(
-                                    songs = songs,
-                                    currentIndex = currentIndex,
-                                    isPlaying = isPlaying,
-                                    onPlay = { playSong(player, it, songs.size); isPlayerOpen = true }
+                            } else {
+                                HomeHeader(
+                                    tab = selectedTab,
+                                    isDark = isDark,
+                                    onToggleTheme = {
+                                        isDark = !isDark
+                                        preferences.edit().putBoolean("dark_mode", isDark).apply()
+                                    }
                                 )
                             }
-                        }
+
+                            if (!hasPermission) {
+                                PermissionPrompt(
+                                    onRequestPermission = { permissionLauncher.launch(permission) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            } else if (songs.isEmpty()) {
+                                EmptyLibrary(modifier = Modifier.weight(1f))
+                            } else {
+                                AnimatedContent(
+                                    targetState = selectedTab,
+                                    modifier = Modifier.weight(1f),
+                                    transitionSpec = {
+                                        (fadeIn() + slideInHorizontally { it / 12 }) togetherWith
+                                            (fadeOut() + slideOutHorizontally { -it / 12 })
+                                    },
+                                    label = "tab transition"
+                                ) { tab ->
+                                    when (tab) {
+                                        MusicTab.Home -> HomeContent(
+                                            songs = songs,
+                                            currentIndex = currentIndex,
+                                            isPlaying = isPlaying,
+                                            onPlay = { playSong(player, it, songs.size); isPlayerOpen = true }
+                                        )
+                                        MusicTab.Search -> SongList(
+                                            songs = visibleSongs,
+                                            currentSongId = currentSong?.id,
+                                            isPlaying = isPlaying,
+                                            emptyMessage = "Axtarışa uyğun mahnı tapılmadı",
+                                            onPlay = { playSong(player, it, songs); isPlayerOpen = true }
+                                        )
+                                        MusicTab.Favorites -> SongList(
+                                            songs = visibleSongs,
+                                            currentSongId = currentSong?.id,
+                                            isPlaying = isPlaying,
+                                            emptyMessage = "Sevimlilərə mahnı əlavə etməmisən",
+                                            onPlay = { playSong(player, it, songs); isPlayerOpen = true }
+                                        )
+                                        MusicTab.Library -> LibraryContent(
+                                            songs = songs,
+                                            currentIndex = currentIndex,
+                                            isPlaying = isPlaying,
+                                            onPlay = { playSong(player, it, songs.size); isPlayerOpen = true }
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
+                }
 
-                    if (currentSong != null) {
+                if (!isPlayerOpen && currentSong != null) {
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = true,
+                        enter = fadeIn(),
+                        exit = fadeOut()
+                    ) {
                         MiniPlayer(
                             song = currentSong,
                             isPlaying = isPlaying,
@@ -420,6 +427,8 @@ private fun PlayerApp(player: Player) {
                             onNext = { player.seekToNextMediaItem() }
                         )
                     }
+                }
+                if (!isPlayerOpen) {
                     NavigationBar(
                         modifier = Modifier.border(
                             BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
@@ -446,9 +455,8 @@ private fun PlayerApp(player: Player) {
                             )
                         }
                     }
-                    }
-                    }
                 }
+            }
             }
         }
     }
